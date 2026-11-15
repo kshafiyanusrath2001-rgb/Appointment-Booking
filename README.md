@@ -1,21 +1,22 @@
-# Appointment Booking Service
+# Provider Appointment Booking
 
-A small Java service that books and cancels provider appointments and
-guarantees that **a provider never has two overlapping ACTIVE appointments**,
-including under concurrent requests.
+This Java service exposes a small JSON API for booking, retrieving, and
+cancelling provider appointments. Its central guarantee is that **one provider
+cannot hold two overlapping ACTIVE appointments**, even when requests arrive
+at the same time.
 
-- Design: [DESIGN.md](docs/DESIGN.md)
-- Assumptions and limitations: [ASSUMPTIONS_AND_LIMITATIONS.md](docs/ASSUMPTIONS_AND_LIMITATIONS.md)
-- Conflict detection review: [REVIEW.md](docs/REVIEW.md)
-- AI usage record: [AI_USAGE.md](docs/AI_USAGE.md)
+- How the service is structured: [DESIGN.md](docs/DESIGN.md)
+- Behavior assumptions and known limits: [ASSUMPTIONS_AND_LIMITATIONS.md](docs/ASSUMPTIONS_AND_LIMITATIONS.md)
+- Conflict and concurrency review: [REVIEW.md](docs/REVIEW.md)
+- AI activity and decisions: [AI_USAGE.md](docs/AI_USAGE.md)
 
 ## Prerequisites
 
-- JDK 17 or newer
-- Network access on the first build (the Maven Wrapper downloads Maven, dependencies and plugins)
+- JDK 17 or newer.
+- Internet access for the first build, so Maven and required artifacts can be downloaded.
 
-The checked-in Maven Wrapper pins Maven 3.9.15, so a separate Maven installation is not required.
-Check Java:
+The included Maven Wrapper selects Maven 3.9.15; you do not need to install
+Maven system-wide. Confirm Java is available with:
 
 ```powershell
 java -version
@@ -24,14 +25,14 @@ java -version
 On Windows, run `.\mvnw.cmd` from the project directory. On macOS/Linux, run
 `sh ./mvnw`.
 
-This project exposes a JSON HTTP API, not a browser UI. Opening
-`http://127.0.0.1:8080/` returns `NOT_FOUND`; use the API requests below to
-book, fetch, or cancel appointments.
+The application is an HTTP API, not a browser-based product. A request to
+`http://127.0.0.1:8080/` has no matching route and returns `NOT_FOUND`.
+Use the endpoints below to create, retrieve, or cancel a booking.
 
 ## Build
 
 ```bash
-./mvnw -B -ntp clean verify
+sh ./mvnw -B -ntp clean verify
 ```
 
 Windows PowerShell:
@@ -40,11 +41,12 @@ Windows PowerShell:
 .\mvnw.cmd -B -ntp clean verify
 ```
 
-`clean verify` compiles the project, runs all tests, and packages the JAR.
+The `clean verify` lifecycle removes old build output, compiles the code,
+executes the tests, and creates the JAR.
 
 ## Run the tests
 
-All tests (unit, integration and concurrency):
+Run the complete unit, HTTP integration, and concurrency test suite with:
 
 ```bash
 sh ./mvnw -B -ntp test
@@ -64,12 +66,12 @@ sh ./mvnw -B -ntp -Dtest=AppointmentConcurrencyTest test
 
 | Test class | Covers |
 |---|---|
-| `AppointmentTest` | Domain invariants: non-blank identifiers and positive-duration appointments |
-| `InMemoryAppointmentStoreTest` | Prevents provider changes from corrupting the provider index |
-| `UtcTimestampsTest` | Accepted/rejected timestamp formats, UTC normalisation, range limits |
-| `AppointmentServiceTest` | Booking, overlap boundaries, validation, cancellation, no partial state changes |
-| `AppointmentConcurrencyTest` | Simultaneous overlapping bookings, double cancellation, cancel-vs-rebook race, randomised stress test |
-| `AppointmentHttpServerTest` | Real HTTP requests: status codes, error bodies, concurrent HTTP bookings |
+| `AppointmentTest` | Appointment field and positive-duration checks |
+| `InMemoryAppointmentStoreTest` | Protects the provider index when a record is replaced |
+| `UtcTimestampsTest` | Timestamp syntax, normalization, and supported date bounds |
+| `AppointmentServiceTest` | Booking rules, interval edges, validation, cancellation, and unchanged state on rejection |
+| `AppointmentConcurrencyTest` | Concurrent bookings and cancellations, plus a stress run |
+| `AppointmentHttpServerTest` | Live HTTP behavior, response codes, errors, and parallel booking requests |
 
 ## Run the service
 
@@ -83,13 +85,13 @@ Windows PowerShell:
 .\mvnw.cmd -q compile exec:java
 ```
 
-Listens on `http://127.0.0.1:8080`. To change the port:
+By default, the server binds to `127.0.0.1:8080`. To select another port:
 
 ```bash
 sh ./mvnw -q compile exec:java -Dexec.args="--port 9090"
 ```
 
-Stop with Ctrl+C.
+Press Ctrl+C to stop the server.
 
 ## Sample requests
 
@@ -103,7 +105,7 @@ curl -s -X POST http://127.0.0.1:8080/appointments -H 'Content-Type: application
 {"appointmentId":"6f1c…","providerId":"dr-smith","startTime":"2026-01-15T10:00:00Z","endTime":"2026-01-15T11:00:00Z","status":"ACTIVE"}
 ```
 
-Book an overlapping slot for the same provider. This returns **409 Conflict**:
+Submitting an overlapping interval for that provider returns **409 Conflict**:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/appointments -H 'Content-Type: application/json' -d '{"providerId":"dr-smith","startTime":"2026-01-15T10:30:00Z","endTime":"2026-01-15T11:30:00Z"}'
@@ -113,19 +115,21 @@ curl -s -X POST http://127.0.0.1:8080/appointments -H 'Content-Type: application
 {"error":{"code":"BOOKING_CONFLICT","message":"Provider already has an active appointment overlapping the requested time","conflictingAppointmentId":"6f1c…"}}
 ```
 
-Book the adjacent slot. This **succeeds** (201), because 11:00 is the end of the first appointment and intervals are half-open:
+The next request starts exactly when the first appointment ends. It succeeds
+with **201 Created** because the service treats intervals as half-open:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/appointments -H 'Content-Type: application/json' -d '{"providerId":"dr-smith","startTime":"2026-01-15T11:00:00Z","endTime":"2026-01-15T12:00:00Z"}'
 ```
 
-Cancel (replace the ID):
+Cancel a booking by substituting its ID in the path:
 
 ```bash
 curl -s -X POST http://127.0.0.1:8080/appointments/<appointmentId>/cancel
 ```
 
-Cancelling again returns **409** with `APPOINTMENT_ALREADY_CANCELLED`, and an unknown ID returns **404** with `APPOINTMENT_NOT_FOUND`.
+A repeat cancellation returns **409 `APPOINTMENT_ALREADY_CANCELLED`**. An
+unknown ID returns **404 `APPOINTMENT_NOT_FOUND`**.
 
 Fetch:
 
@@ -133,20 +137,21 @@ Fetch:
 curl -s http://127.0.0.1:8080/appointments/<appointmentId>
 ```
 
-Invalid input returns **400** naming the field, for example a timestamp without an offset:
+Invalid input returns **400** and identifies the field. For example, a
+timestamp without an explicit offset is rejected:
 
 ```json
 {"error":{"code":"VALIDATION_ERROR","message":"startTime must be an ISO 8601 timestamp with an explicit UTC offset, e.g. 2026-01-15T09:00:00Z","field":"startTime"}}
 ```
 
-## Expected behaviour for conflicting bookings
+## Booking outcomes
 
-- Same provider, overlapping `[start, end)` with an ACTIVE appointment → `409 BOOKING_CONFLICT`; nothing is stored.
-- Different provider, same times → allowed.
-- Touching intervals (one ends exactly when the other starts) → allowed.
-- Overlapping a **cancelled** appointment → allowed.
-- Times in different offsets are compared as instants: `16:00+05:30` conflicts with `10:00Z–11:00Z`.
-- Many simultaneous overlapping requests for one provider → exactly one `201`, all others `409`.
+- An overlap with an ACTIVE appointment for the same provider returns `409 BOOKING_CONFLICT` and does not add a record.
+- The same time may be booked for another provider.
+- Back-to-back intervals are accepted; sharing an endpoint is not an overlap.
+- A cancelled appointment no longer reserves its interval.
+- Offsets are normalized before comparison. For example, `16:00+05:30` overlaps `10:00Z–11:00Z`.
+- In a simultaneous set of conflicting booking requests, one succeeds and the others receive `409`.
 
 ## Project layout
 

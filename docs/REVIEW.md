@@ -1,16 +1,17 @@
-# Review: Booking Conflict Detection
+# Review: Booking Conflicts and Concurrency
 
-**Scope:** overlap boundaries, adjacency, cancelled exclusion, provider isolation,
-partial state changes, concurrent bypass of conflict detection.
-**Method:** expected outcomes were derived from the specification first, then
-compared against the code. This analysis is AI-assisted. The candidate has
-confirmed separately that they completed an independent review; details of
-that review are not included here. Original verification status is historical;
-the follow-up verification addendum supersedes it for the current workspace.
+**What was checked:** interval edges, adjacency, cancelled records, provider
+separation, rejected-request state, and races between concurrent operations.
+**Approach:** outcomes were written from the requirements and then checked
+against the implementation. This is AI-assisted analysis. The candidate has
+also confirmed completing a separate review, but its specific steps are not
+recorded here. The original test status below is historical; §6 reports the
+later full-suite result.
 
-## 1. Edge cases and expected outcomes (derived from the spec, before reading code)
+## 1. Expected results at interval boundaries
 
-Existing appointment: provider `p1`, `[10:00, 11:00)` UTC, ACTIVE.
+Reference case: provider `p1` already has an ACTIVE appointment from 10:00 to
+11:00 UTC.
 
 | # | Scenario | Expected | Implementation | Test |
 |---|---|---|---|---|
@@ -32,119 +33,104 @@ Existing appointment: provider `p1`, `[10:00, 11:00)` UTC, ACTIVE.
 | 16 | Simultaneous double cancel | Exactly 1 succeeds | ✅ | `simultaneousCancellationsExactlyOneSucceeds` |
 
 
-**Why the overlap formula is right:** `[S,E)` and `[s,e)` are disjoint exactly when
-`E <= s` or `e <= S`. Negating gives `S < e && s < E`, which is
-`Appointment.java:45`, called as (existing, request). Strict comparisons make
-touching intervals non-overlapping.
+**Reasoning behind the predicate:** the intervals do not intersect if the
+existing one ends before the request (`E <= s`) or the request ends before the
+existing one (`e <= S`). Negating those cases yields `S < e && s < E`. The
+implementation applies this strict comparison in `Appointment.java`; equal
+end/start times therefore remain adjacent rather than conflicting.
 
 ## 2. Confirmed defect
 
-### D1: Booking lock was scoped to the service object, not the data
+### D1: The lock originally protected a service, not its shared store
 
-- **Where:** `AppointmentService` had `private final Object lock = new Object();` and used `synchronized (lock)`.
-- **Why it fails:** the invariant protects data in `InMemoryAppointmentStore`, but each
-  `AppointmentService` instance had its own lock. The public constructor
-  `AppointmentService(InMemoryAppointmentStore)` allows two services to share one
-  store, as a DI container might do with two service instances and a singleton
-  repository. A thread in service 1 and a thread in service 2 then hold *different*
-  locks, both read "no conflict", and both insert. Two cancels through different
-  services can likewise both succeed.
-- **Reachability:** not reachable through the shipped `main()`, which builds one
-  service. It is a latent defect in the public API.
-- **Minimal fix (applied):** `synchronized (store)` instead of the private field
-  (3 lines). The store's methods already synchronise on that monitor, and Java
-  monitors are reentrant.
-- **Regression tests (at original review time, written but not yet run):** two
-  tests in `AppointmentConcurrencyTest`; they are included in the subsequently
-  passing full suite (see §6).
-  They alternate tasks between two services sharing a `SlowAppointmentStore`.
-- **Proposed mutation check (not executed):** reintroduce a per-service lock
-  (`synchronized (this)`) and confirm the shared-store tests fail.
+- **Earlier implementation:** the service used a private lock object.
+- **Failure mode:** two `AppointmentService` instances backed by the same
+  `InMemoryAppointmentStore` would synchronize on different objects. Both
+  could observe a free interval and insert, or both could report a successful
+  cancellation. Sharing a store is supported by the public constructor, even
+  though the shipped `main()` creates only one service.
+- **Change made:** the service now synchronizes on the store itself. Its
+  synchronized methods use that same reentrant monitor.
+- **Regression coverage:** concurrency cases alternate requests between
+  services sharing one `SlowAppointmentStore`. They are included in the
+  passing full run in §6; at the first review they had been written but not run.
+- **Not performed:** a mutation run that restores the service-owned lock and
+  verifies these tests fail.
 
 ## 3. Misleading test (corrected)
 
-### T1: `cancelRacingWithRebookingOfSameSlotStaysConsistent` overstated what it proves
+### T1: The cancel/rebook race test needed a narrower claim
 
-It was presented, in a code comment and in DESIGN.md, as verifying race safety.
-But cancellation only ever *removes* ACTIVE appointments, so a booking that reads
-stale data is just more conservative. This race can't break the invariant even
-with no lock, so the test can't detect a missing lock. **Fix:** kept the test (it
-still catches deadlocks, unexpected exceptions and invalid outcomes) and rewrote
-its comment and the DESIGN.md text to say exactly that. No production code
-changed in that correction.
+An earlier comment implied this test proves the booking invariant under a
+cancel/rebook race. Cancellation only removes an ACTIVE blocker, however, so a
+stale read could only make a booking more conservative; this scenario cannot
+expose a missing lock. The test remains useful for checking valid outcomes,
+unexpected exceptions, and deadlocks, but it is not evidence that the lock is
+necessary. Its comment and the design text were corrected without changing
+production code.
 
 ## 4. Remaining risks (not defects against the spec; intentionally not changed)
 
 | ID | Risk | Why not changed |
 |---|---|---|
-| R1 | Provider IDs are exact, case- and whitespace-sensitive: `"p1 "` ≠ `"p1"`, so one real provider could be double-booked under two spellings | The spec gives no canonical form; silently trimming changes identity. Possible fix: reject IDs with leading/trailing whitespace. Documented in ASSUMPTIONS_AND_LIMITATIONS.md |
-| R2 | Direct writes to the public store can still bypass service-level conflict checks | `Appointment` now rejects blank identifiers and non-positive durations; `replace` also rejects provider changes that would corrupt its index. Public `add` can still bypass the booking invariant, so writes should continue to go through the service |
-| R3 | One lock serialises all providers | Correct, and contention is negligible in-memory. Per-provider or database-level locking is the scaling path (DESIGN.md §9) |
-| R4 | Concurrency tests rely on timing (`SlowAppointmentStore` sleeps) | The sleep widens the race window; mutation testing has not been run |
+| R1 | Provider IDs are case- and whitespace-sensitive, so one real provider can be represented by different strings | No canonical form was specified. Trimming could merge distinct IDs; rejecting surrounding whitespace remains an option documented in ASSUMPTIONS_AND_LIMITATIONS.md |
+| R2 | Direct calls to the store can skip the conflict rule | The model checks basic fields and the store protects its index on replacement, but `add` is not a booking operation. Use the service for writes |
+| R3 | A single monitor serializes bookings across providers | Correct but limits parallelism; provider-level or database synchronization is a scaling option (DESIGN.md §9) |
+| R4 | The concurrency tests widen a timing window rather than proving every possible schedule | `SlowAppointmentStore` improves the chance of exposing a race; no mutation testing was run |
 
 ## 5. Dedicated concurrency review
 
-**Scenario:** two simultaneous requests for provider `p1`: A `[10:00, 11:00)` and
-B `[10:30, 11:30)` UTC. They overlap (`10:00 < 11:30` and `10:30 < 11:00`), so
-exactly one may succeed.
+**Case examined:** provider `p1` receives A `[10:00, 11:00)` and B
+`[10:30, 11:30)` at nearly the same time. Since the intervals intersect,
+exactly one booking should be accepted.
 
-**1. Where the race could occur.** In `AppointmentService.bookAppointment`,
-between the read (`store.findByProvider`) and the write (`store.add`). Without
-protection the interleaving *A reads [] → B reads [] → A adds → B adds* stores
-both. The HTTP server runs requests on a 16-thread pool, so A and B really do
-execute in parallel. The same check-then-act shape exists in `cancelAppointment`
-(`findById` → `isActive` → `replace`), where two cancels could both succeed.
+**1. Race location.** The booking hazard lies between `findByProvider` and
+`add` in `bookAppointment`. If A and B both read before either writes, both
+could conclude the slot is free. Cancellation also has a compound
+lookup/check/replace sequence that could otherwise allow two successful cancels.
+The HTTP server uses a 16-thread executor, so requests are not inherently
+serialized by the adapter.
 
-**2. Does the current mechanism prevent it?** Yes. There are no database
-transactions (the store is in-memory). Instead the whole read-check-write sequence
-runs inside `synchronized (store)`. B can't start its read until A has written
-and released the monitor, and the Java Memory Model guarantees that releasing a
-monitor *happens-before* the next acquisition of it, so B's read sees A's
-appointment and B gets `BOOKING_CONFLICT`. The store's per-method
-`synchronized` alone would **not** be enough: it makes each call atomic, not the
-sequence.
+**2. What prevents it now?** There is no database transaction: the data is
+in-memory. Instead, the service holds `synchronized (store)` across the entire
+read-check-write sequence. The second caller waits until the first releases the
+monitor, then observes the new appointment and receives `BOOKING_CONFLICT`.
+Synchronizing each store method alone would not protect the gap between calls.
 
-**3. Are conflict checking and persistence atomic?** Yes, with respect to every
-other booking and cancellation, because both run in the same critical section on
-the same monitor, and `store.add` / `store.replace` are the only writes. Work done
-outside the lock (validation, UUID generation) touches no shared state.
-*Caveat:* atomicity relies on all writes going through the service. The store's
-public `add`/`replace` could bypass it (risk R2).
+**3. Is the operation atomic relative to other service calls?** Yes. Booking
+and cancellation use the same monitor, and validation and UUID creation happen
+before entering it without touching shared state. This guarantee assumes writes
+go through the service; direct store operations can bypass it (risk R2).
 
-**4. Can cancellation race with booking?** They're serialised on the same monitor.
-For a cancel of an existing `[10:00,11:00)` racing booking B, either the cancel
-runs first (B succeeds) or B runs first (B conflicts, then the cancel succeeds).
-Both are valid. Even without a lock this race can't violate the invariant:
-cancellation only *removes* an active appointment, so a stale read makes the
-booking more conservative, never less. The race that *can* go wrong is
-cancel-vs-cancel (two successes), and the lock prevents it. With a single monitor
-and no other locks taken inside it, there's no lock ordering and therefore no deadlock.
+**4. What if booking and cancellation overlap in time?** The monitor orders
+them. If cancellation happens first, the new booking can proceed; otherwise,
+the still-active record causes a conflict before the cancellation completes.
+Either outcome is valid. The more serious race is two cancellations of the
+same record both succeeding, which the lock prevents.
 
-**5. Is the locking strategy appropriate for this persistence mechanism?** Yes.
-For an in-memory store in one JVM, a mutex around the compound operation is the
-standard, simplest correct choice; transaction isolation and constraints don't
-exist here. Tradeoffs: (a) all providers share one lock (fine at this scale; per-
-provider striping is the scaling path), and (b) the lock is in-process only. With
-several service instances or a real database, the guarantee must move into the
-database (exclusion constraint, row lock or SERIALIZABLE; see DESIGN.md §9). An
-earlier version scoped the lock to the service object, which was defect D1, now fixed.
+**5. Does this fit the current store?** For one in-memory store in one JVM, a
+monitor around each compound operation is a small and direct solution. Its
+limits are global contention and lack of coordination across processes. If the
+service gains multiple instances or database persistence, the invariant needs
+to move to database constraints or transaction-level protection (DESIGN.md §9).
+The earlier service-owned lock is the defect described in D1.
 
-**Correction needed at original review time:** none beyond D1, which was already fixed. No production code changed in that review pass.
+**Production change during the dedicated review:** none beyond the D1 fix,
+which was already present.
 
 **Focused test added:** `AppointmentConcurrencyTest.simultaneousRequestsAAndBForSameProviderExactlyOneSucceeds`
 (repeated 20 times). It releases A and B together through a barrier against
 `SlowAppointmentStore` and asserts: exactly one succeeds; the other fails with
 `BookingConflictException` naming the winner; the store contains only the winner.
 
-**Execution status at the time of the original review: NOT RUN.**
+**Status during the initial review: NOT RUN.**
 `mvn -q test -Dtest=AppointmentConcurrencyTest` failed with
 `mvn: command not found`, and `java -version` reported *Unable to locate a Java Runtime*.
 
-**What the test checks:** under the exact A/B interleaving the brief describes,
-with a 40 ms gap forced between each thread's read and write, the service never
-stores both. The test is repeated 20 times. Mutations M1 (no lock), M9 (write
-outside the lock), and M11 (per-service lock) were proposed as checks, but the
-mutation suite has not been executed.
+**Test scope:** with a 40 ms delay around store operations, the test repeatedly
+releases A and B together and checks that both are never stored. It runs 20
+times. Proposed mutations M1 (remove the lock), M9 (write outside the lock),
+and M11 (use a per-service lock) were not executed.
 
 **Limitations of the test:**
 - It is timing-based. Without the lock it would fail with very high probability
@@ -158,34 +144,30 @@ mutation suite has not been executed.
 
 ## 6. Follow-up verification (2026-11-15)
 
-The original review-time test status above is historical. On Windows 11 with
-Azul Zulu JDK 17.0.12, the full clean verification was subsequently run using
-the Maven Wrapper pinned to Maven 3.9.15:
+The initial test status above was superseded by a later full run. On Windows 11,
+using Azul Zulu JDK 17.0.12 and the Maven Wrapper pinned to Maven 3.9.15, the
+following clean verification completed:
 
 ```powershell
 .\mvnw.cmd -B -ntp clean verify
 ```
 
-Result: **BUILD SUCCESS; 158 tests, 0 failures, 0 errors, 0 skipped.** This
-includes `AppointmentConcurrencyTest`, so the focused A/B concurrency test and
-other concurrency tests were executed. The mutation checks listed above were
-not run in this follow-up.
+Result: **BUILD SUCCESS; 158 tests, 0 failures, 0 errors, and 0 skipped.** The
+run included `AppointmentConcurrencyTest`, including the repeated A/B case.
+The proposed mutation checks remain unrun.
 
-This remains AI-assisted technical analysis. The candidate has confirmed
-completing a separate independent review; the specific checks and findings
-from that review were not supplied here.
+This document records AI-assisted analysis. The candidate separately confirmed
+an independent review; its individual checks and findings are not detailed here.
 
-The follow-up also hardened two public domain/store boundaries: `Appointment`
-now rejects blank identifiers and zero/negative durations at construction, and
-`InMemoryAppointmentStore.replace` rejects a provider change before modifying
-the record or its provider index. Focused regression tests were added for both.
+Two boundary checks were also added in the follow-up: `Appointment` rejects
+blank identifiers and non-positive durations, while `replace` rejects
+provider changes before altering either the record or its index. Each has a
+focused regression test.
 
 ## 7. Areas checked with no defect found
 
-- Overlap boundaries, adjacency, nanosecond edges, offset normalisation (cases 1–9).
-- Cancelled exclusion, including mixed cancelled+active neighbours (10–11).
-- Provider isolation by exact key (12).
-- No partial state: all validation precedes the lock; a conflict throws before
-  the only write; `cancel` writes only after both checks (13–14).
-- `getAppointment` reads without the booking lock. That's safe: it is a single
-  synchronized store read of an immutable record.
+- Interval edges, adjacency, nanosecond overlaps, and offset normalization (cases 1–9).
+- Exclusion of cancelled records, including a mix of cancelled and active neighbors (10–11).
+- Provider separation using exact identifiers (12).
+- No partial writes: validation occurs before locking, conflicts exit before insertion, and cancellation replaces a record only after both checks pass (13–14).
+- `getAppointment` needs no compound-operation lock; it reads one immutable record through the synchronized store method.

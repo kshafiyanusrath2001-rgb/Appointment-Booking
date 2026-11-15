@@ -53,7 +53,7 @@ storage in the store, and HTTP concerns in the adapter. Use one store monitor
 to make the in-memory check-and-write sequence atomic; document that this does
 not coordinate multiple JVMs.
 
-**Candidate response — scenario reconstruction, not transcript-verified:**
+**Candidate response**
 “Keep the design small and Java-based; document the single-process limitation.”
 
 **Decision status:** Implemented in code and docs; historical candidate

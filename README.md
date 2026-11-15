@@ -4,10 +4,10 @@ A small Java service that books and cancels provider appointments and
 guarantees that **a provider never has two overlapping ACTIVE appointments**,
 including under concurrent requests.
 
-- Design: [DESIGN.md](DESIGN.md)
-- Assumptions and limitations: [ASSUMPTIONS_AND_LIMITATIONS.md](ASSUMPTIONS_AND_LIMITATIONS.md)
-- Conflict detection review: [REVIEW.md](REVIEW.md)
-- AI usage record: [AI_USAGE.md](AI_USAGE.md)
+- Design: [DESIGN.md](docs/DESIGN.md)
+- Assumptions and limitations: [ASSUMPTIONS_AND_LIMITATIONS.md](docs/ASSUMPTIONS_AND_LIMITATIONS.md)
+- Conflict detection review: [REVIEW.md](docs/REVIEW.md)
+- AI usage record: [AI_USAGE.md](docs/AI_USAGE.md)
 
 ## Prerequisites
 
